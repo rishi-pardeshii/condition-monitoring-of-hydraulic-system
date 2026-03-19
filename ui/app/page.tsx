@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   SystemStatusCards,
@@ -15,7 +15,6 @@ import {
 } from '@/components/dashboard';
 import {
   generateHistoricalData,
-  getCurrentSensorData,
   getSystemCondition,
   SensorData,
   SystemCondition,
@@ -34,34 +33,153 @@ export default function Dashboard() {
   const [systemCondition, setSystemCondition] = useState<SystemCondition | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const isInitialLoadRef = useRef(true);
+  const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ─── Helpers ────────────────────────────────────────────────────────────────
+
+  const preparePredictionData = (sensorData: SensorData): number[] => {
+    const { timestamp, ...dataWithoutTimestamp } = sensorData;
+    return Object.values(dataWithoutTimestamp) as number[];
+  };
+
+  const fetchPrediction = async (
+    sensorData: SensorData,
+    signal: AbortSignal
+  ): Promise<SystemCondition> => {
+    const predictionData = preparePredictionData(sensorData);
+
+    const response = await fetch('/api/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newDataArray: predictionData }),
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Prediction API failed: ${response.statusText}`);
+    }
+
+    return response.json();
+  };
+
+  // ─── Full history load (runs on mount + every 30 s) ─────────────────────────
+
+  const loadData = async () => {
+    try {
+      if (isInitialLoadRef.current) {
+        setIsLoading(true);
+      }
+      setError(null);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const data = generateHistoricalData(24);
+      const latestData = data[data.length - 1];
+
+      const prediction = await fetchPrediction(latestData, controller.signal);
+      clearTimeout(timeoutId);
+
+      setHistoricalData(data);
+      setCurrentData(latestData);
+      setSystemCondition(prediction);
+      setLastUpdated(new Date());
+
+      if (isInitialLoadRef.current) {
+        isInitialLoadRef.current = false;
+      }
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error ? err.message : 'Failed to load dashboard data';
+      setError(errorMessage);
+      console.error('Dashboard data load error:', err);
+
+      const data = generateHistoricalData(24);
+      setHistoricalData(data);
+      setCurrentData(data[data.length - 1]);
+      setSystemCondition(getSystemCondition());
+      setLastUpdated(new Date());
+
+      if (isInitialLoadRef.current) {
+        isInitialLoadRef.current = false;
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // ─── Live stream: appends one new point per second ──────────────────────────
+
+  const startLiveStream = () => {
+    // Always clear the previous interval before starting a new one
+    // to prevent multiple streams running in parallel
+    if (liveIntervalRef.current) {
+      clearInterval(liveIntervalRef.current);
+    }
+
+    liveIntervalRef.current = setInterval(async () => {
+      const newPoint = generateHistoricalData(1)[0];
+
+      // Functional updater reads latest state — avoids stale closure bug
+      setHistoricalData((prev) => [...prev.slice(-23), newPoint]);
+      setCurrentData(newPoint);
+      setLastUpdated(new Date());
+
+      // Re-fetch prediction for the new point.
+      // Fails silently so a slow/down API never freezes the live chart.
+      try {
+        const prediction = await fetchPrediction(
+          newPoint,
+          new AbortController().signal
+        );
+        setSystemCondition(prediction);
+      } catch {
+        // Keep last known prediction
+      }
+    }, 1000);
+  };
+
+  // ─── Effect: mount → load history → start stream → refresh every 30 s ──────
 
   useEffect(() => {
-    // Initial data load
-    loadData();
+    const init = async () => {
+      await loadData();   // full 24-point history first
+      startLiveStream();  // then begin streaming new points every second
+    };
 
-    // Refresh data every 30 seconds
-    const interval = setInterval(loadData, 30000);
-    return () => clearInterval(interval);
+    init();
+
+    // Every 30 s: reset the baseline history and restart the live stream
+    const refreshInterval = setInterval(async () => {
+      await loadData();
+      startLiveStream();
+    }, 30000);
+
+    return () => {
+      clearInterval(refreshInterval);
+      if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
+    };
   }, []);
 
-  const loadData = () => {
-    setHistoricalData(generateHistoricalData(24));
-    setCurrentData(getCurrentSensorData());
-    setSystemCondition(getSystemCondition());
-    setLastUpdated(new Date());
-    setIsLoading(false);
-  };
+  // ─── Loading state ───────────────────────────────────────────────────────────
 
   if (isLoading || !currentData || !systemCondition) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="flex items-center gap-3">
           <RefreshCw className="h-6 w-6 animate-spin text-primary" />
-          <span className="text-lg">Loading dashboard...</span>
+          <span className="text-lg">
+            {error ? `Error: ${error}` : 'Loading dashboard...'}
+          </span>
         </div>
       </div>
     );
   }
+
+  // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-background">
@@ -92,7 +210,9 @@ export default function Dashboard() {
                 </div>
               </div>
               <button
-                onClick={loadData}
+                onClick={() => {
+                  loadData().then(startLiveStream);
+                }}
                 className="p-2 rounded-lg hover:bg-muted transition-colors"
                 title="Refresh data"
               >
