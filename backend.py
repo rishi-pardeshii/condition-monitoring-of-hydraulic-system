@@ -15,8 +15,8 @@ print("Model and scaler loaded successfully.")
 @app.route("/predict", methods=["POST"])
 def predict():
 
+    # Get feature data coming from fetched request 
     data = request.get_json()
-    print(data)
 
     features = np.array(data['newDataArray']).reshape(1, -1)
     print(f"Input shape: {features.shape}")
