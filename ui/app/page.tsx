@@ -130,15 +130,15 @@ export default function Dashboard() {
 
       // Re-fetch prediction for the new point.
       // Fails silently so a slow/down API never freezes the live chart.
-      try {
-        const prediction = await fetchPrediction(
-          newPoint,
-          new AbortController().signal
-        );
-        setSystemCondition(prediction);
-      } catch {
-        // Keep last known prediction
-      }
+      // try {
+      //   const prediction = await fetchPrediction(
+      //     newPoint,
+      //     new AbortController().signal
+      //   );
+      //   setSystemCondition(prediction);
+      // } catch {
+      //   // Keep last known prediction
+      // }
     }, 1000);
   };
 
